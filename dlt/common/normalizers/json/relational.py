@@ -26,6 +26,8 @@ from dlt.common.typing import DictStrAny, TDataItem, StrAny
 from dlt.common.schema import Schema
 from dlt.common.schema.typing import (
     C_DLT_ID,
+    C_DLT_HASH,
+    C_DLT_IS_DELETED,
     C_DLT_LOAD_ID,
     TColumnName,
     TSimpleRegex,
@@ -97,6 +99,12 @@ class DataItemNormalizer(DataItemNormalizerBase[RelationalNormalizerConfig]):
         )
         self.c_dlt_list_idx: TColumnName = TColumnName(
             self.naming.normalize_identifier(self.C_DLT_LIST_IDX)
+        )
+        self.c_dlt_hash: TColumnName = TColumnName(
+            self.naming.normalize_identifier(C_DLT_HASH)
+        )
+        self.c_dlt_is_deleted: TColumnName = TColumnName(
+            self.naming.normalize_identifier(C_DLT_IS_DELETED)
         )
         self.c_value: TColumnName = TColumnName(self.naming.normalize_identifier(self.C_VALUE))
 
@@ -211,6 +219,12 @@ class DataItemNormalizer(DataItemNormalizerBase[RelationalNormalizerConfig]):
                     row_id = get_row_hash(dict_row)
             else:
                 row_id = generate_dlt_id()
+            # for hash-ledger, populate _dlt_hash and _dlt_is_deleted
+            if row_id_type == "row_hash":
+                table_obj = self.schema.tables.get(table)
+                if table_obj and self.c_dlt_hash in table_obj.get("columns", {}):
+                    flattened_row[self.c_dlt_hash] = row_id
+                    flattened_row[self.c_dlt_is_deleted] = False
 
         flattened_row[self.c_dlt_id] = row_id
         return row_id

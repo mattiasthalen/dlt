@@ -2135,3 +2135,175 @@ def test_insert_only_with_nested_tables(destination_config: DestinationTestConfi
     # Child1 exists so not re-inserted, Child2 unchanged,
     # Child3 and Child4 are new inserts
     assert len(parent_tables["parent_items__children"]) == 4
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(
+        default_sql_configs=True,
+        supports_merge=True,
+    ),
+    ids=lambda x: x.name,
+)
+def test_hash_ledger_incremental_and_full_snapshot(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    """Incremental runs insert new hashes; full snapshots also tombstone missing hashes."""
+    skip_if_unsupported_merge_strategy(destination_config, "hash-ledger")
+
+    p = destination_config.setup_pipeline("hash_ledger_test", dev_mode=True)
+
+    @dlt.resource(
+        write_disposition={"disposition": "merge", "strategy": "hash-ledger"},
+        table_format=destination_config.table_format,
+    )
+    def items(rows: List[StrAny], full_snapshot: bool = False):
+        dlt.current.load_package_state()["state"].setdefault(
+            "hash_ledgers", {}
+        )["items"] = {"full_snapshot": full_snapshot}
+        yield rows
+
+    # run 1: full snapshot with A
+    info = p.run(items([{"value": "A"}], full_snapshot=True), **destination_config.run_kwargs)
+    assert_load_info(info)
+    rows = load_tables_to_dicts(p, "items", exclude_system_cols=False)["items"]
+    live = [r for r in rows if r["_dlt_is_deleted"] is False]
+    assert len(live) == 1
+    assert live[0]["value"] == "A"
+
+    # run 2: incremental with B (A stays live, B added)
+    info = p.run(items([{"value": "B"}], full_snapshot=False), **destination_config.run_kwargs)
+    assert_load_info(info)
+    rows = load_tables_to_dicts(p, "items", exclude_system_cols=False)["items"]
+    live = [r for r in rows if r["_dlt_is_deleted"] is False]
+    assert len(live) == 2
+
+    # run 3: full snapshot with B only (A gets tombstoned)
+    info = p.run(items([{"value": "B"}], full_snapshot=True), **destination_config.run_kwargs)
+    assert_load_info(info)
+    rows = load_tables_to_dicts(p, "items", exclude_system_cols=False)["items"]
+    events = [(r["value"], r["_dlt_is_deleted"]) for r in rows]
+    assert events.count(("A", False)) == 1
+    assert events.count(("A", True)) == 1
+    assert events.count(("B", False)) == 1
+    assert events.count(("B", True)) == 0
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(
+        default_sql_configs=True,
+        supports_merge=True,
+    ),
+    ids=lambda x: x.name,
+)
+def test_hash_ledger_reinserts_tombstoned_hash(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    """A tombstoned hash can reappear as a new live event (A > B > A)."""
+    skip_if_unsupported_merge_strategy(destination_config, "hash-ledger")
+
+    p = destination_config.setup_pipeline("hash_ledger_aba_test", dev_mode=True)
+
+    @dlt.resource(
+        write_disposition={"disposition": "merge", "strategy": "hash-ledger"},
+        table_format=destination_config.table_format,
+    )
+    def items(rows: List[StrAny], full_snapshot: bool = False):
+        dlt.current.load_package_state()["state"].setdefault(
+            "hash_ledgers", {}
+        )["items"] = {"full_snapshot": full_snapshot}
+        yield rows
+
+    # A live
+    p.run(items([{"value": "A"}], full_snapshot=True), **destination_config.run_kwargs)
+    # B replaces A (full snapshot)
+    p.run(items([{"value": "B"}], full_snapshot=True), **destination_config.run_kwargs)
+    # A returns (full snapshot)
+    p.run(items([{"value": "A"}], full_snapshot=True), **destination_config.run_kwargs)
+
+    rows = load_tables_to_dicts(p, "items", exclude_system_cols=False)["items"]
+    events = [(r["value"], r["_dlt_is_deleted"]) for r in rows]
+    # A: live, tombstone, live again = 2 live + 1 tombstone
+    assert events.count(("A", False)) == 2
+    assert events.count(("A", True)) == 1
+    # B: live, tombstone
+    assert events.count(("B", False)) == 1
+    assert events.count(("B", True)) == 1
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(
+        default_sql_configs=True,
+        supports_merge=True,
+    ),
+    ids=lambda x: x.name,
+)
+def test_hash_ledger_full_snapshot_tombstones_absent(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    """A full snapshot with new-only data tombstones all previously live hashes."""
+    skip_if_unsupported_merge_strategy(destination_config, "hash-ledger")
+
+    p = destination_config.setup_pipeline("hash_ledger_absent_test", dev_mode=True)
+
+    @dlt.resource(
+        write_disposition={"disposition": "merge", "strategy": "hash-ledger"},
+        table_format=destination_config.table_format,
+    )
+    def items(rows: List[StrAny], full_snapshot: bool = False):
+        dlt.current.load_package_state()["state"].setdefault(
+            "hash_ledgers", {}
+        )["items"] = {"full_snapshot": full_snapshot}
+        yield rows
+
+    # seed with A and B
+    p.run(
+        items([{"value": "A"}, {"value": "B"}], full_snapshot=True),
+        **destination_config.run_kwargs,
+    )
+    # full snapshot with C only: A and B get tombstoned, C is added
+    p.run(items([{"value": "C"}], full_snapshot=True), **destination_config.run_kwargs)
+
+    rows = load_tables_to_dicts(p, "items", exclude_system_cols=False)["items"]
+    events = [(r["value"], r["_dlt_is_deleted"]) for r in rows]
+    assert sorted(events) == [
+        ("A", False),
+        ("A", True),
+        ("B", False),
+        ("B", True),
+        ("C", False),
+    ]
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(
+        default_sql_configs=True,
+        supports_merge=True,
+    ),
+    ids=lambda x: x.name,
+)
+def test_hash_ledger_deduplicates_within_run(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    """Duplicate hashes within a single run produce only one live event."""
+    skip_if_unsupported_merge_strategy(destination_config, "hash-ledger")
+
+    p = destination_config.setup_pipeline("hash_ledger_dedup_test", dev_mode=True)
+
+    @dlt.resource(
+        write_disposition={"disposition": "merge", "strategy": "hash-ledger"},
+        table_format=destination_config.table_format,
+    )
+    def items():
+        yield [{"value": "A"}, {"value": "A"}, {"value": "B"}]
+
+    info = p.run(items(), **destination_config.run_kwargs)
+    assert_load_info(info)
+
+    rows = load_tables_to_dicts(p, "items", exclude_system_cols=False)["items"]
+    live = [r for r in rows if r["_dlt_is_deleted"] is False]
+    assert len(live) == 2
+    assert len({r["_dlt_hash"] for r in live}) == 2

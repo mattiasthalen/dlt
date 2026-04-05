@@ -185,6 +185,8 @@ class SqlMergeFollowupJob(SqlFollowupJob):
             merge_sql = cls.gen_upsert_sql(table_chain, sql_client, insert_only=True)
         elif merge_strategy == "scd2":
             merge_sql = cls.gen_scd2_sql(table_chain, sql_client)
+        elif merge_strategy == "hash-ledger":
+            merge_sql = cls.gen_hash_ledger_sql(table_chain, sql_client)
 
         # prepend setup code
         return cls._gen_table_setup_clauses(table_chain, sql_client) + merge_sql
@@ -898,6 +900,139 @@ class SqlMergeFollowupJob(SqlFollowupJob):
                                 WHERE {deleted_cond}
                             );
                         """)
+        return sql
+
+    @classmethod
+    def gen_hash_ledger_sql(
+        cls, table_chain: Sequence[PreparedTableSchema], sql_client: SqlClientBase[Any]
+    ) -> List[str]:
+        """Generates SQL statements for the `hash-ledger` merge strategy.
+
+        Appends new live events for unseen hashes and optionally tombstones
+        hashes absent from a full snapshot. Only root tables are supported.
+        """
+        if len(table_chain) > 1:
+            raise MergeDispositionException(
+                sql_client.fully_qualified_dataset_name(),
+                sql_client.fully_qualified_dataset_name(staging=True),
+                [t["name"] for t in table_chain],
+                "hash-ledger merge strategy does not support nested tables.",
+            )
+
+        sql: List[str] = []
+        root_table = table_chain[0]
+        root_table_name, staging_root_table_name = sql_client.get_qualified_table_names(
+            root_table["name"]
+        )
+
+        escape_id = sql_client.escape_column_name
+        escape_lit = sql_client.capabilities.escape_literal
+        if escape_lit is None:
+            escape_lit = DestinationCapabilitiesContext.generic_capabilities().escape_literal
+
+        hash_col = escape_id(
+            get_first_column_name_with_prop(root_table, "x-row-version")
+        )
+        is_deleted_col = escape_id(
+            get_first_column_name_with_prop(root_table, "hard_delete")
+        )
+        load_id_col = escape_id("_dlt_load_id")
+        false_literal = escape_lit(False)
+        true_literal = escape_lit(True)
+
+        columns = list(map(escape_id, get_columns_names_with_prop(root_table, "name")))
+        col_str = ", ".join(columns)
+
+        # read load package state for full_snapshot flag
+        ledger_state = current_load_package()["state"].get("hash_ledgers", {}).get(
+            root_table["name"], {}
+        )
+        full_snapshot = ledger_state.get("full_snapshot", False)
+
+        # deduplicate staging by hash, keeping latest by _dlt_load_id
+        dedup_staging = cls._new_temp_table_name(
+            root_table["name"], "dedup", sql_client
+        )
+        sql.append(cls._to_temp_table(
+            f"""SELECT {col_str}
+            FROM (
+                SELECT ROW_NUMBER() OVER (
+                    PARTITION BY {hash_col}
+                    ORDER BY {load_id_col} DESC
+                ) AS _dlt_dedup_rn, {col_str}
+                FROM {staging_root_table_name}
+            ) AS _dlt_dedup_numbered
+            WHERE _dlt_dedup_rn = 1""",
+            dedup_staging,
+            hash_col,
+        ))
+
+        # insert live rows from staging where hash is not currently live in dest
+        # a hash is "currently live" when its latest event has _dlt_is_deleted = false
+        sql.append(f"""
+            INSERT INTO {root_table_name}({col_str})
+            SELECT {col_str} FROM {dedup_staging} AS s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {root_table_name} AS d
+                WHERE d.{hash_col} = s.{hash_col}
+                AND d.{load_id_col} = (
+                    SELECT MAX(d2.{load_id_col})
+                    FROM {root_table_name} AS d2
+                    WHERE d2.{hash_col} = d.{hash_col}
+                )
+                AND d.{is_deleted_col} = {false_literal}
+            )
+        """)
+
+        # on full snapshot, tombstone hashes live in dest but absent from staging
+        if full_snapshot:
+            row_key_col = escape_id(
+                cls.get_row_key_col(
+                    table_chain,
+                    root_table,
+                    sql_client.fully_qualified_dataset_name(),
+                    sql_client.fully_qualified_dataset_name(staging=True),
+                )
+            )
+            # build tombstone: copy latest live row, replacing deleted flag, load id, row id
+            load_id_subq = (
+                f"(SELECT MAX(s2.{load_id_col}) FROM"
+                f" {staging_root_table_name} AS s2)"
+            )
+            tombstone_cols = []
+            for c in columns:
+                if c == is_deleted_col:
+                    tombstone_cols.append(f"{true_literal} AS {c}")
+                elif c == load_id_col:
+                    tombstone_cols.append(f"{load_id_subq} AS {c}")
+                elif c == row_key_col:
+                    # unique id per tombstone: hash + load_id avoids collisions
+                    # when the same hash is tombstoned across multiple runs
+                    tombstone_cols.append(
+                        cls.gen_concat_sql(
+                            [f"d.{hash_col}", escape_lit("_"), load_id_subq]
+                        )
+                        + f" AS {c}"
+                    )
+                else:
+                    tombstone_cols.append(f"d.{c}")
+            tombstone_col_str = ", ".join(tombstone_cols)
+
+            sql.append(f"""
+                INSERT INTO {root_table_name}({col_str})
+                SELECT {tombstone_col_str}
+                FROM {root_table_name} AS d
+                WHERE d.{load_id_col} = (
+                    SELECT MAX(d2.{load_id_col})
+                    FROM {root_table_name} AS d2
+                    WHERE d2.{hash_col} = d.{hash_col}
+                )
+                AND d.{is_deleted_col} = {false_literal}
+                AND d.{hash_col} NOT IN (
+                    SELECT {hash_col} FROM {dedup_staging}
+                )
+            """)
+
         return sql
 
     @classmethod
