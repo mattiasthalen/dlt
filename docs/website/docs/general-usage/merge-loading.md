@@ -1,7 +1,7 @@
 ---
 title: Merge loading
 description: Merge loading with dlt
-keywords: [merge, incremental loading, delete-insert, scd2, upsert, insert-only]
+keywords: [merge, incremental loading, delete-insert, scd2, upsert, insert-only, hash-ledger]
 ---
 # Merge loading
 
@@ -9,7 +9,7 @@ Merge loading allows you to update existing data in your destination tables, rat
 
 To perform a merge load, you need to specify the `write_disposition` as `merge` on your resource and provide a `primary_key` or `merge_key`.
 
-Depending on your use case, you can choose from four different merge strategies.
+Depending on your use case, you can choose from five different merge strategies.
 
 ## Merge strategies
 
@@ -17,6 +17,7 @@ Depending on your use case, you can choose from four different merge strategies.
 2. [`scd2` strategy](#scd2-strategy)
 3. [`upsert` strategy](#upsert-strategy)
 4. [`insert-only` strategy](#insert-only-strategy)
+5. [`hash-ledger` strategy](#hash-ledger-strategy)
 
 ## `delete-insert` strategy
 
@@ -720,3 +721,52 @@ def my_insert_only_resource():
     ...
 ...
 ```
+
+## `hash-ledger` strategy
+
+The `hash-ledger` merge strategy stores an append-only history of row-content events. Instead of updating or deleting existing rows, it appends new events to represent changes over time.
+
+- `dlt` computes `_dlt_hash` from the canonical JSON representation of user columns (excluding `_dlt_*` system columns)
+- New live rows (`_dlt_is_deleted=false`) are inserted when their `_dlt_hash` is not currently live in the destination
+- Authoritative full-snapshot runs append tombstone rows (`_dlt_is_deleted=true`) for hashes that are currently live but missing from the snapshot
+- Existing ledger rows are never updated or deleted
+- Duplicate hashes within a single run are deduplicated automatically
+
+### Basic usage
+
+```py
+@dlt.resource(
+    write_disposition={"disposition": "merge", "strategy": "hash-ledger"},
+)
+def account_snapshots(full_snapshot: bool = False):
+    pkg_state = dlt.current.load_package_state()["state"]
+    pkg_state.setdefault("hash_ledgers", {})["account_snapshots"] = {  # type: ignore[typeddict-item]
+        "full_snapshot": full_snapshot
+    }
+    yield from read_snapshot_rows()
+```
+
+Set `full_snapshot=True` when your resource yields a complete snapshot of the source data. On these runs, any hash that was previously live but is absent from the snapshot will receive a tombstone event. On ordinary runs (`full_snapshot=False`), only new hashes are inserted -- no tombstones are appended.
+
+### Querying current live rows
+
+The ledger is append-only, so to get the current state you need to find the latest event per hash and filter to non-deleted:
+
+```sql
+SELECT t.*
+FROM my_table t
+JOIN (
+    SELECT _dlt_hash, MAX(_dlt_load_id) AS latest_load_id
+    FROM my_table
+    GROUP BY _dlt_hash
+) latest
+  ON t._dlt_hash = latest._dlt_hash
+ AND t._dlt_load_id = latest.latest_load_id
+WHERE t._dlt_is_deleted = FALSE;
+```
+
+### Limitations
+
+- Only root tables are supported in v1. Nested tables are not tracked by the hash ledger.
+- `primary_key` and `merge_key` hints are ignored -- row identity is based entirely on `_dlt_hash`.
+- Multi-run authoritative snapshots (stitching separate `pipeline.run()` calls into one logical snapshot) are not supported in v1.

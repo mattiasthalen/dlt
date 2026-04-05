@@ -358,6 +358,8 @@ for **nested** tables.
 
 You are able to bring your own `row_key` by adding a `_dlt_id` column/field to your data (both root and nested). All data types with an equal operator are supported.
 
+For [`hash-ledger`](merge-loading.md#hash-ledger-strategy), root-table row identity is derived from canonical row content and stored in `_dlt_hash`. Ledger state is represented by `_dlt_is_deleted` instead of by mutating or deleting prior rows.
+
 `merge` write disposition requires an additional nested reference that goes from **nested** to **root** table, skipping all parent tables in between. This reference is created by [adding a column with a hint](merge-loading.md#forcing-root-key-propagation) `root_key` (named `_dlt_root_id` by default) to nested tables.
 
 ### Generate custom linking for nested tables
