@@ -16,6 +16,7 @@ from dlt.common.schema.utils import (
 from dlt.common.time import ensure_pendulum_datetime_utc
 from dlt.common.storages.load_package import load_package_state as current_load_package
 
+from dlt.destinations.exceptions import MergeDispositionException
 from dlt.destinations.impl.sqlalchemy.db_api_client import SqlalchemyClient
 from dlt.destinations.sql_jobs import SqlMergeFollowupJob
 from dlt.destinations.utils import get_deterministic_temp_table_name
@@ -467,6 +468,145 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
                 ),
             )
             sqla_statements.append(insert_statement)
+
+        return [
+            str(stmt.compile(sql_client.engine, compile_kwargs={"literal_binds": True}))
+            for stmt in sqla_statements
+        ]
+
+    @classmethod
+    def gen_hash_ledger_sql(
+        cls,
+        table_chain: Sequence[PreparedTableSchema],
+        sql_client: SqlalchemyClient,  # type: ignore[override]
+    ) -> List[str]:
+        """Generates SQLAlchemy statements for the `hash-ledger` merge strategy."""
+        if len(table_chain) > 1:
+            raise MergeDispositionException(
+                sql_client.fully_qualified_dataset_name(),
+                sql_client.fully_qualified_dataset_name(staging=True),
+                [t["name"] for t in table_chain],
+                "hash-ledger merge strategy does not support nested tables.",
+            )
+
+        sqla_statements: List = []
+        root_table = table_chain[0]
+        root_table_obj = sql_client.get_existing_table(root_table["name"])
+        staging_root_table_obj = root_table_obj.to_metadata(
+            sql_client.metadata, schema=sql_client.staging_dataset_name
+        )
+
+        hash_col = get_first_column_name_with_prop(root_table, "x-row-version")
+        is_deleted_col = get_first_column_name_with_prop(root_table, "hard_delete")
+        load_id_col = "_dlt_load_id"
+
+        columns = [col.name for col in root_table_obj.columns]
+
+        ledger_state = current_load_package()["state"].get("hash_ledgers", {}).get(
+            root_table["name"], {}
+        )
+        full_snapshot = ledger_state.get("full_snapshot", False)
+
+        # deduplicate staging by hash, keeping latest by _dlt_load_id
+        dedup_inner = sa.select(
+            sa.func.row_number()
+            .over(
+                partition_by=staging_root_table_obj.c[hash_col],
+                order_by=sa.desc(staging_root_table_obj.c[load_id_col]),
+            )
+            .label("_dlt_dedup_rn"),
+            *[staging_root_table_obj.c[c] for c in columns],
+        ).subquery("_dlt_dedup_numbered")
+
+        dedup_select = sa.select(
+            *[dedup_inner.c[c] for c in columns]
+        ).where(dedup_inner.c._dlt_dedup_rn == 1)
+
+        dedup_cte = dedup_select.cte("_dlt_dedup_staging")
+
+        # insert live rows where hash is not currently live in dest
+        d = root_table_obj.alias("d")
+        d2 = root_table_obj.alias("d2")
+
+        live_check = (
+            sa.select(sa.literal(1))
+            .select_from(d)
+            .where(
+                sa.and_(
+                    d.c[hash_col] == dedup_cte.c[hash_col],
+                    d.c[load_id_col] == (
+                        sa.select(sa.func.max(d2.c[load_id_col]))
+                        .where(d2.c[hash_col] == d.c[hash_col])
+                        .correlate_except(d2)
+                        .scalar_subquery()
+                    ),
+                    d.c[is_deleted_col] == sa.literal(False),
+                )
+            )
+        )
+
+        insert_live = root_table_obj.insert().from_select(
+            columns,
+            sa.select(*[dedup_cte.c[c] for c in columns]).where(
+                ~sa.exists(live_check)
+            ),
+        )
+        sqla_statements.append(insert_live)
+
+        if full_snapshot:
+            row_key_col = cls.get_row_key_col(
+                table_chain,
+                root_table,
+                sql_client.fully_qualified_dataset_name(),
+                sql_client.fully_qualified_dataset_name(staging=True),
+            )
+
+            max_staging_load_id = (
+                sa.select(sa.func.max(staging_root_table_obj.c[load_id_col]))
+                .scalar_subquery()
+            )
+
+            d_tomb = root_table_obj.alias("d")
+            d3 = root_table_obj.alias("d3")
+
+            tombstone_cols = []
+            for c in columns:
+                if c == is_deleted_col:
+                    tombstone_cols.append(sa.literal(True).label(c))
+                elif c == load_id_col:
+                    tombstone_cols.append(max_staging_load_id.label(c))
+                elif c == row_key_col:
+                    tombstone_cols.append(
+                        (sa.cast(d_tomb.c[hash_col], sa.String)
+                         + sa.literal("_")
+                         + sa.cast(max_staging_load_id, sa.String)).label(c)
+                    )
+                else:
+                    tombstone_cols.append(d_tomb.c[c])
+
+            tombstone_select = (
+                sa.select(*tombstone_cols)
+                .select_from(d_tomb)
+                .where(
+                    sa.and_(
+                        d_tomb.c[load_id_col] == (
+                            sa.select(sa.func.max(d3.c[load_id_col]))
+                            .where(d3.c[hash_col] == d_tomb.c[hash_col])
+                            .correlate_except(d3)
+                            .scalar_subquery()
+                        ),
+                        d_tomb.c[is_deleted_col] == sa.literal(False),
+                        d_tomb.c[hash_col].notin_(
+                            sa.select(dedup_cte.c[hash_col])
+                        ),
+                    )
+                )
+            )
+
+            insert_tombstones = root_table_obj.insert().from_select(
+                columns, tombstone_select
+            )
+            sqla_statements.append(insert_tombstones)
 
         return [
             str(stmt.compile(sql_client.engine, compile_kwargs={"literal_binds": True}))
