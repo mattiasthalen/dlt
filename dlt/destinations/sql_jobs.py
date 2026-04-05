@@ -930,12 +930,8 @@ class SqlMergeFollowupJob(SqlFollowupJob):
         if escape_lit is None:
             escape_lit = DestinationCapabilitiesContext.generic_capabilities().escape_literal
 
-        hash_col = escape_id(
-            get_first_column_name_with_prop(root_table, "x-row-version")
-        )
-        is_deleted_col = escape_id(
-            get_first_column_name_with_prop(root_table, "hard_delete")
-        )
+        hash_col = escape_id(get_first_column_name_with_prop(root_table, "x-row-version"))
+        is_deleted_col = escape_id(get_first_column_name_with_prop(root_table, "hard_delete"))
         load_id_col = escape_id("_dlt_load_id")
         false_literal = escape_lit(False)
         true_literal = escape_lit(True)
@@ -944,17 +940,16 @@ class SqlMergeFollowupJob(SqlFollowupJob):
         col_str = ", ".join(columns)
 
         # read load package state for full_snapshot flag
-        ledger_state = current_load_package()["state"].get("hash_ledgers", {}).get(
-            root_table["name"], {}
+        ledger_state = (
+            current_load_package()["state"].get("hash_ledgers", {}).get(root_table["name"], {})
         )
         full_snapshot = ledger_state.get("full_snapshot", False)
 
         # deduplicate staging by hash, keeping latest by _dlt_load_id
-        dedup_staging = cls._new_temp_table_name(
-            root_table["name"], "dedup", sql_client
-        )
-        sql.append(cls._to_temp_table(
-            f"""SELECT {col_str}
+        dedup_staging = cls._new_temp_table_name(root_table["name"], "dedup", sql_client)
+        sql.append(
+            cls._to_temp_table(
+                f"""SELECT {col_str}
             FROM (
                 SELECT ROW_NUMBER() OVER (
                     PARTITION BY {hash_col}
@@ -963,9 +958,10 @@ class SqlMergeFollowupJob(SqlFollowupJob):
                 FROM {staging_root_table_name}
             ) AS _dlt_dedup_numbered
             WHERE _dlt_dedup_rn = 1""",
-            dedup_staging,
-            hash_col,
-        ))
+                dedup_staging,
+                hash_col,
+            )
+        )
 
         # insert live rows from staging where hash is not currently live in dest
         # a hash is "currently live" when its latest event has _dlt_is_deleted = false
@@ -995,10 +991,7 @@ class SqlMergeFollowupJob(SqlFollowupJob):
                 )
             )
             # build tombstone: copy latest live row, replacing deleted flag, load id, row id
-            load_id_subq = (
-                f"(SELECT MAX(s2.{load_id_col}) FROM"
-                f" {staging_root_table_name} AS s2)"
-            )
+            load_id_subq = f"(SELECT MAX(s2.{load_id_col}) FROM {staging_root_table_name} AS s2)"
             tombstone_cols = []
             for c in columns:
                 if c == is_deleted_col:
@@ -1009,9 +1002,7 @@ class SqlMergeFollowupJob(SqlFollowupJob):
                     # unique id per tombstone: hash + load_id avoids collisions
                     # when the same hash is tombstoned across multiple runs
                     tombstone_cols.append(
-                        cls.gen_concat_sql(
-                            [f"d.{hash_col}", escape_lit("_"), load_id_subq]
-                        )
+                        cls.gen_concat_sql([f"d.{hash_col}", escape_lit("_"), load_id_subq])
                         + f" AS {c}"
                     )
                 else:

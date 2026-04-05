@@ -502,8 +502,8 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
 
         columns = [col.name for col in root_table_obj.columns]
 
-        ledger_state = current_load_package()["state"].get("hash_ledgers", {}).get(
-            root_table["name"], {}
+        ledger_state = (
+            current_load_package()["state"].get("hash_ledgers", {}).get(root_table["name"], {})
         )
         full_snapshot = ledger_state.get("full_snapshot", False)
 
@@ -518,9 +518,9 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
             *[staging_root_table_obj.c[c] for c in columns],
         ).subquery("_dlt_dedup_numbered")
 
-        dedup_select = sa.select(
-            *[dedup_inner.c[c] for c in columns]
-        ).where(dedup_inner.c._dlt_dedup_rn == 1)
+        dedup_select = sa.select(*[dedup_inner.c[c] for c in columns]).where(
+            dedup_inner.c._dlt_dedup_rn == 1
+        )
 
         dedup_cte = dedup_select.cte("_dlt_dedup_staging")
 
@@ -534,7 +534,8 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
             .where(
                 sa.and_(
                     d.c[hash_col] == dedup_cte.c[hash_col],
-                    d.c[load_id_col] == (
+                    d.c[load_id_col]
+                    == (
                         sa.select(sa.func.max(d2.c[load_id_col]))
                         .where(d2.c[hash_col] == d.c[hash_col])
                         .correlate_except(d2)
@@ -547,9 +548,7 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
 
         insert_live = root_table_obj.insert().from_select(
             columns,
-            sa.select(*[dedup_cte.c[c] for c in columns]).where(
-                ~sa.exists(live_check)
-            ),
+            sa.select(*[dedup_cte.c[c] for c in columns]).where(~sa.exists(live_check)),
         )
         sqla_statements.append(insert_live)
 
@@ -561,10 +560,9 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
                 sql_client.fully_qualified_dataset_name(staging=True),
             )
 
-            max_staging_load_id = (
-                sa.select(sa.func.max(staging_root_table_obj.c[load_id_col]))
-                .scalar_subquery()
-            )
+            max_staging_load_id = sa.select(
+                sa.func.max(staging_root_table_obj.c[load_id_col])
+            ).scalar_subquery()
 
             d_tomb = root_table_obj.alias("d")
             d3 = root_table_obj.alias("d3")
@@ -577,9 +575,11 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
                     tombstone_cols.append(max_staging_load_id.label(c))
                 elif c == row_key_col:
                     tombstone_cols.append(
-                        (sa.cast(d_tomb.c[hash_col], sa.String)
-                         + sa.literal("_")
-                         + sa.cast(max_staging_load_id, sa.String)).label(c)
+                        (
+                            sa.cast(d_tomb.c[hash_col], sa.String)
+                            + sa.literal("_")
+                            + sa.cast(max_staging_load_id, sa.String)
+                        ).label(c)
                     )
                 else:
                     tombstone_cols.append(d_tomb.c[c])
@@ -589,23 +589,20 @@ class SqlalchemyMergeFollowupJob(SqlMergeFollowupJob):
                 .select_from(d_tomb)
                 .where(
                     sa.and_(
-                        d_tomb.c[load_id_col] == (
+                        d_tomb.c[load_id_col]
+                        == (
                             sa.select(sa.func.max(d3.c[load_id_col]))
                             .where(d3.c[hash_col] == d_tomb.c[hash_col])
                             .correlate_except(d3)
                             .scalar_subquery()
                         ),
                         d_tomb.c[is_deleted_col] == sa.literal(False),
-                        d_tomb.c[hash_col].notin_(
-                            sa.select(dedup_cte.c[hash_col])
-                        ),
+                        d_tomb.c[hash_col].notin_(sa.select(dedup_cte.c[hash_col])),
                     )
                 )
             )
 
-            insert_tombstones = root_table_obj.insert().from_select(
-                columns, tombstone_select
-            )
+            insert_tombstones = root_table_obj.insert().from_select(columns, tombstone_select)
             sqla_statements.append(insert_tombstones)
 
         return [

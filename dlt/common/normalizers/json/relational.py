@@ -100,9 +100,7 @@ class DataItemNormalizer(DataItemNormalizerBase[RelationalNormalizerConfig]):
         self.c_dlt_list_idx: TColumnName = TColumnName(
             self.naming.normalize_identifier(self.C_DLT_LIST_IDX)
         )
-        self.c_dlt_hash: TColumnName = TColumnName(
-            self.naming.normalize_identifier(C_DLT_HASH)
-        )
+        self.c_dlt_hash: TColumnName = TColumnName(self.naming.normalize_identifier(C_DLT_HASH))
         self.c_dlt_is_deleted: TColumnName = TColumnName(
             self.naming.normalize_identifier(C_DLT_IS_DELETED)
         )

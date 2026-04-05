@@ -2158,9 +2158,9 @@ def test_hash_ledger_incremental_and_full_snapshot(
         table_format=destination_config.table_format,
     )
     def items(rows: List[StrAny], full_snapshot: bool = False):
-        dlt.current.load_package_state()["state"].setdefault(
-            "hash_ledgers", {}
-        )["items"] = {"full_snapshot": full_snapshot}
+        dlt.current.load_package_state()["state"].setdefault("hash_ledgers", {})["items"] = {
+            "full_snapshot": full_snapshot
+        }
         yield rows
 
     # run 1: full snapshot with A
@@ -2210,9 +2210,9 @@ def test_hash_ledger_reinserts_tombstoned_hash(
         table_format=destination_config.table_format,
     )
     def items(rows: List[StrAny], full_snapshot: bool = False):
-        dlt.current.load_package_state()["state"].setdefault(
-            "hash_ledgers", {}
-        )["items"] = {"full_snapshot": full_snapshot}
+        dlt.current.load_package_state()["state"].setdefault("hash_ledgers", {})["items"] = {
+            "full_snapshot": full_snapshot
+        }
         yield rows
 
     # A live
@@ -2253,9 +2253,9 @@ def test_hash_ledger_full_snapshot_tombstones_absent(
         table_format=destination_config.table_format,
     )
     def items(rows: List[StrAny], full_snapshot: bool = False):
-        dlt.current.load_package_state()["state"].setdefault(
-            "hash_ledgers", {}
-        )["items"] = {"full_snapshot": full_snapshot}
+        dlt.current.load_package_state()["state"].setdefault("hash_ledgers", {})["items"] = {
+            "full_snapshot": full_snapshot
+        }
         yield rows
 
     # seed with A and B
