@@ -109,6 +109,8 @@ def get_root_row_id_type(schema: Schema, table_name: str) -> TRowIdType:
         merge_strategy = resolve_merge_strategy(schema.tables, table)
         if merge_strategy in ("upsert", "insert-only"):
             return "key_hash"
+        elif merge_strategy == "hash-ledger":
+            return "row_hash"
         elif merge_strategy == "scd2":
             x_row_version_col = get_first_column_name_with_prop(
                 schema.get_table(table_name),

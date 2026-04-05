@@ -44,6 +44,10 @@ DLT_NAME_PREFIX = "_dlt"
 # default dlt columns
 C_DLT_ID = "_dlt_id"
 """unique id of current row"""
+C_DLT_HASH = "_dlt_hash"
+"""row content hash used by hash-ledger merge strategy"""
+C_DLT_IS_DELETED = "_dlt_is_deleted"
+"""soft-delete flag used by hash-ledger merge strategy"""
 C_DLT_LOAD_ID = "_dlt_load_id"
 """load id to identify records loaded in a single load package"""
 # NOTE C_DLT_LOAD_ID != C_DLT_LOADS_TABLE_LOAD_ID but they refer to the exact same entity / value.
@@ -248,7 +252,7 @@ TTableProcessingHints = TypedDict(
 
 
 TWriteDisposition = Literal["skip", "append", "replace", "merge"]
-TLoaderMergeStrategy = Literal["delete-insert", "scd2", "upsert", "insert-only"]
+TLoaderMergeStrategy = Literal["delete-insert", "hash-ledger", "scd2", "upsert", "insert-only"]
 TLoaderReplaceStrategy = Literal["truncate-and-insert", "insert-from-staging", "staging-optimized"]
 
 

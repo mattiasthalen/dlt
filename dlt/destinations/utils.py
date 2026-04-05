@@ -139,11 +139,20 @@ def verify_schema_merge_disposition(
 
     # verifies schema settings specific to sql job client
     for table in load_tables:
-        # from now on validate only top level tables
+        table_name = table["name"]
+        merge_strategy = resolve_merge_strategy(schema.tables, table, capabilities)
+
         if is_nested_table(table):
+            if table["write_disposition"] == "merge" and merge_strategy == "hash-ledger":
+                exception_log.append(
+                    SchemaCorruptedException(
+                        schema.name,
+                        "The `hash-ledger` merge strategy is only supported for root tables."
+                        f" Table `{table_name}` is nested.",
+                    )
+                )
             continue
 
-        table_name = table["name"]
         if table["write_disposition"] == "merge":
             if "x-merge-strategy" in table and table["x-merge-strategy"] not in MERGE_STRATEGIES:  # type: ignore[typeddict-item]
                 exception_log.append(
@@ -154,7 +163,6 @@ def verify_schema_merge_disposition(
                     )
                 )
 
-            merge_strategy = resolve_merge_strategy(schema.tables, table, capabilities)
             if merge_strategy is None:
                 table_format_info = ""
                 if capabilities.supported_table_formats:
@@ -194,6 +202,19 @@ def verify_schema_merge_disposition(
                     log(
                         f"Found `merge_key` for table `{table['name']}` with"
                         f" `{merge_strategy}` merge strategy. Merge key is not supported"
+                        " for this strategy and will be ignored."
+                    )
+            elif merge_strategy == "hash-ledger":
+                if has_column_with_prop(table, "primary_key"):
+                    log(
+                        f"Found `primary_key` for table `{table['name']}` with"
+                        " `hash-ledger` merge strategy. Primary key is not supported"
+                        " for this strategy and will be ignored."
+                    )
+                if has_column_with_prop(table, "merge_key"):
+                    log(
+                        f"Found `merge_key` for table `{table['name']}` with"
+                        " `hash-ledger` merge strategy. Merge key is not supported"
                         " for this strategy and will be ignored."
                     )
         if has_column_with_prop(table, "hard_delete"):

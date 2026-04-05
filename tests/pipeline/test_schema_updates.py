@@ -251,6 +251,42 @@ def test_empty_value_as_key_replace_column_hints(
     assert not p.default_schema.tables["get_resource"]["columns"]["other_id"].get(key_hint)
 
 
+def test_hash_ledger_adds_system_columns_to_root_only() -> None:
+    """hash-ledger injects _dlt_hash and _dlt_is_deleted on root table only."""
+
+    @dlt.resource(
+        write_disposition={"disposition": "merge", "strategy": "hash-ledger"},
+        nested_hints={"children": {}},
+    )
+    def hash_ledger_items():
+        yield [{"id": 1, "children": [{"child_id": 1}]}]
+
+    resource = hash_ledger_items()
+    table_schema = resource.compute_table_schema()
+    nested_table_schemas = resource.compute_nested_table_schemas(
+        table_schema["name"], Schema("test_schema").naming
+    )
+
+    # root table has _dlt_hash with x-row-version and _dlt_is_deleted with hard_delete
+    assert "_dlt_hash" in table_schema["columns"]
+    assert table_schema["columns"]["_dlt_hash"]["x-row-version"] is True
+    assert table_schema["columns"]["_dlt_hash"]["nullable"] is False
+    assert table_schema["columns"]["_dlt_hash"]["unique"] is False
+    assert table_schema["columns"]["_dlt_hash"]["row_key"] is False
+
+    assert "_dlt_is_deleted" in table_schema["columns"]
+    assert table_schema["columns"]["_dlt_is_deleted"]["hard_delete"] is True
+    assert table_schema["columns"]["_dlt_is_deleted"]["data_type"] == "bool"
+    assert table_schema["columns"]["_dlt_is_deleted"]["nullable"] is False
+
+    # nested tables do not get hash-ledger columns
+    child_table = next(
+        t for t in nested_table_schemas if t["name"] == "hash_ledger_items__children"
+    )
+    assert "_dlt_hash" not in child_table["columns"]
+    assert "_dlt_is_deleted" not in child_table["columns"]
+
+
 @pytest.mark.parametrize(
     "key_hint",
     ["merge_key", "primary_key"],

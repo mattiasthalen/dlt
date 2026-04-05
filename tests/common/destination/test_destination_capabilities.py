@@ -1,17 +1,25 @@
+from typing import List
+
 import pytest
 
 from dlt.common.destination.exceptions import DestinationCapabilitiesException, UnsupportedDataType
 from dlt.common.destination.utils import (
+    prepare_load_table,
     resolve_merge_strategy,
     verify_schema_capabilities,
     verify_supported_data_types,
 )
 from dlt.common.exceptions import TerminalValueError
-from dlt.common.schema.exceptions import SchemaIdentifierNormalizationCollision
+from dlt.common.schema.exceptions import (
+    SchemaCorruptedException,
+    SchemaIdentifierNormalizationCollision,
+)
 from dlt.common.schema.schema import Schema
 from dlt.common.schema.utils import new_table
 from dlt.common.storages.load_package import ParsedLoadJobFileName
+from dlt.destinations import utils as destination_utils
 from dlt.destinations.impl.bigquery.bigquery_adapter import AUTODETECT_SCHEMA_HINT
+from dlt.destinations.utils import verify_schema_merge_disposition
 
 
 def test_resolve_merge_strategy() -> None:
@@ -71,6 +79,10 @@ def test_resolve_merge_strategy() -> None:
     schema.tables["native_scd2"]["x-merge-strategy"] = "scd2"  # type: ignore[typeddict-unknown-key]
     assert resolve_merge_strategy(schema.tables, native_scd2, filesystem().capabilities()) is None
 
+    # hash-ledger strategy
+    schema.tables["table"]["x-merge-strategy"] = "hash-ledger"  # type: ignore[typeddict-unknown-key]
+    assert resolve_merge_strategy(schema.tables, table, duckdb().capabilities()) == "hash-ledger"
+
 
 def test_verify_capabilities_ident_collisions() -> None:
     schema = Schema("schema")
@@ -102,6 +114,47 @@ def test_verify_capabilities_ident_collisions() -> None:
     assert len(exceptions) == 2
     assert isinstance(exceptions[1], SchemaIdentifierNormalizationCollision)
     assert exceptions[1].identifier_type == "table"
+
+
+def test_verify_hash_ledger_validation_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """hash-ledger rejects nested tables and warns about primary/merge keys."""
+    from dlt.destinations import duckdb
+
+    schema = Schema("schema")
+    root_table = new_table(
+        "root_table",
+        write_disposition="merge",
+        columns=[
+            {"name": "id", "data_type": "bigint", "primary_key": True},
+            {"name": "updated_at", "data_type": "timestamp", "merge_key": True},
+        ],
+    )
+    child_table = new_table(
+        "child_table", parent_table_name="root_table", write_disposition="merge"
+    )
+    root_table["x-merge-strategy"] = "hash-ledger"  # type: ignore[typeddict-unknown-key]
+    child_table["x-merge-strategy"] = "hash-ledger"  # type: ignore[typeddict-unknown-key]
+    schema.update_table(root_table)
+    schema.update_table(child_table)
+
+    caps = duckdb().capabilities()
+    load_tables = [
+        prepare_load_table(schema.tables, root_table, caps),
+        prepare_load_table(schema.tables, child_table, caps),
+    ]
+
+    warnings: List[str] = []
+    monkeypatch.setattr(destination_utils.logger, "warning", warnings.append)
+    exceptions = verify_schema_merge_disposition(schema, load_tables, caps)
+
+    # nested table should cause an error
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0], SchemaCorruptedException)
+    assert "only supported for root tables" in str(exceptions[0])
+
+    # primary_key and merge_key should produce warnings
+    assert any("Primary key is not supported" in w for w in warnings)
+    assert any("Merge key is not supported" in w for w in warnings)
 
 
 def test_verify_capabilities_data_types() -> None:

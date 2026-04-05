@@ -1109,10 +1109,17 @@ def test_dlt_table_no_root_key(norm: RelationalNormalizer) -> None:
     [
         ("upsert", "key_hash"),
         ("insert-only", "key_hash"),
+        ("hash-ledger", "row_hash"),
         ("delete-insert", "random"),
         ("scd2", "random"),
     ],
-    ids=["upsert-key_hash", "insert-only-key_hash", "delete-insert-random", "scd2-random"],
+    ids=[
+        "upsert-key_hash",
+        "insert-only-key_hash",
+        "hash-ledger-row_hash",
+        "delete-insert-random",
+        "scd2-random",
+    ],
 )
 def test_get_root_row_id_type(
     norm: RelationalNormalizer,

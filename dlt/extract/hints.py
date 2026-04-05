@@ -14,6 +14,8 @@ from typing_extensions import Self
 from dlt.common import logger
 from dlt.common.schema.typing import (
     C_DLT_ID,
+    C_DLT_HASH,
+    C_DLT_IS_DELETED,
     TColumnProp,
     TFileFormat,
     TPartialTableSchema,
@@ -702,6 +704,20 @@ class DltResourceHints:
                 # of insert-delete-reinsert pattern
                 "unique": False,
                 "row_key": False,
+            }
+        elif merge_strategy == "hash-ledger":
+            dict_["columns"][C_DLT_HASH] = {
+                "name": C_DLT_HASH,
+                "nullable": False,
+                "x-row-version": True,
+                "unique": False,
+                "row_key": False,
+            }
+            dict_["columns"][C_DLT_IS_DELETED] = {
+                "name": C_DLT_IS_DELETED,
+                "data_type": "bool",
+                "nullable": False,
+                "hard_delete": True,
             }
 
     @staticmethod
