@@ -10,11 +10,12 @@ from packaging.version import Version
 from dlt import version
 from dlt.common import logger
 from dlt.common.configuration import configspec
+from dlt.common.destination.utils import resolve_insert_only_scope
 from dlt.common.destination.exceptions import DestinationUndefinedEntity
 from dlt.common.libs.pyarrow import cast_arrow_schema_types
 from dlt.common.libs.utils import load_open_tables
 from dlt.common.pipeline import SupportsPipeline
-from dlt.common.schema.typing import TWriteDisposition, TTableSchema
+from dlt.common.schema.typing import C_DLT_LOAD_ID, TWriteDisposition, TTableSchema
 from dlt.common.schema.utils import get_first_column_name_with_prop, get_columns_names_with_prop
 from dlt.common.utils import assert_min_pkg_version
 from dlt.common.exceptions import MissingDependencyException
@@ -93,6 +94,7 @@ def merge_iceberg_table(
     data: pa.Table,
     schema: TTableSchema,
     load_table_name: str,
+    previous_load_id: Optional[str] = None,
 ) -> None:
     """Merges in-memory Arrow data into on-disk Iceberg table."""
     strategy = schema["x-merge-strategy"]  # type: ignore[typeddict-item]
@@ -101,10 +103,19 @@ def merge_iceberg_table(
         with table.update_schema() as update:
             update.union_by_name(ensure_iceberg_compatible_arrow_schema(data.schema))
 
-        if "parent" in schema:
-            join_cols = [get_first_column_name_with_prop(schema, "unique")]
-        else:
-            join_cols = get_columns_names_with_prop(schema, "primary_key")
+        join_cols = _get_merge_identity_columns(schema)
+
+        if strategy == "insert-only" and resolve_insert_only_scope(schema) == "previous_load":
+            batch_tbl = ensure_iceberg_compatible_arrow_data(data)
+            if previous_load_id is None:
+                table.append(batch_tbl)
+                return
+
+            previous_keys = _get_previous_iceberg_keys(table, join_cols, previous_load_id)
+            batch_tbl = _filter_new_iceberg_rows(batch_tbl, join_cols, previous_keys)
+            if batch_tbl.num_rows > 0:
+                table.append(batch_tbl)
+            return
 
         # TODO: replace the batching method with transaction with pyiceberg's release after 0.9.1
         for rb in data.to_batches(max_chunksize=1_000):
@@ -123,6 +134,37 @@ def merge_iceberg_table(
             f'Merge strategy "{strategy}" is not supported for Iceberg tables. '
             f'Table: "{load_table_name}".'
         )
+
+
+def _get_merge_identity_columns(schema: TTableSchema) -> List[str]:
+    if "parent" in schema:
+        return [get_first_column_name_with_prop(schema, "unique")]
+    return get_columns_names_with_prop(schema, "primary_key")
+
+
+def _get_previous_iceberg_keys(
+    table: IcebergTable, join_cols: List[str], previous_load_id: str
+) -> set[tuple[Any, ...]]:
+    previous_rows = table.scan(selected_fields=[*join_cols, C_DLT_LOAD_ID]).to_arrow()
+    previous_rows = previous_rows.filter(
+        pa.compute.equal(previous_rows[C_DLT_LOAD_ID], previous_load_id)
+    )
+    return {
+        tuple(row[col] for col in join_cols) for row in previous_rows.select(join_cols).to_pylist()
+    }
+
+
+def _filter_new_iceberg_rows(
+    data: pa.Table, join_cols: List[str], previous_keys: set[tuple[Any, ...]]
+) -> pa.Table:
+    if not previous_keys:
+        return data
+
+    mask = [
+        tuple(row[col] for col in join_cols) not in previous_keys
+        for row in data.select(join_cols).to_pylist()
+    ]
+    return data.filter(pa.array(mask))
 
 
 def get_sql_catalog(

@@ -3,7 +3,11 @@ from typing import Any, Dict, List, Sequence, Tuple, cast, Optional, Callable, U
 import yaml
 from dlt.common.time import ensure_pendulum_datetime_utc
 from dlt.common.destination import PreparedTableSchema
-from dlt.common.destination.utils import resolve_merge_strategy
+from dlt.common.destination.exceptions import (
+    DestinationCapabilitiesException,
+    DestinationTransientException,
+)
+from dlt.common.destination.utils import resolve_insert_only_scope, resolve_merge_strategy
 from dlt.common.typing import TAnyDateTime, TypedDict
 
 from dlt.common.schema.typing import (
@@ -25,7 +29,6 @@ from dlt.common.destination.capabilities import DestinationCapabilitiesContext
 from dlt.destinations.exceptions import MergeDispositionException
 from dlt.destinations.job_impl import FollowupJobRequestImpl
 from dlt.destinations.sql_client import SqlClientBase
-from dlt.common.destination.exceptions import DestinationTransientException
 
 
 class SqlJobCreationException(DestinationTransientException):
@@ -165,6 +168,26 @@ class SqlMergeFollowupJob(SqlFollowupJob):
     """
 
     @classmethod
+    def from_table_chain(
+        cls,
+        table_chain: Sequence[PreparedTableSchema],
+        sql_client: SqlClientBase[Any],
+    ) -> FollowupJobRequestImpl:
+        root_table = table_chain[0]
+        merge_strategy = resolve_merge_strategy(
+            {root_table["name"]: root_table}, root_table, sql_client.capabilities
+        )
+        if (
+            merge_strategy == "insert-only"
+            and resolve_insert_only_scope(root_table) == "previous_load"
+        ):
+            raise DestinationCapabilitiesException(
+                '`insert-only` merge strategy with `scope="previous_load"` is not'
+                " supported for SQL merge destinations."
+            )
+        return super().from_table_chain(table_chain, sql_client)
+
+    @classmethod
     def generate_sql(
         cls,
         table_chain: Sequence[PreparedTableSchema],
@@ -230,7 +253,7 @@ class SqlMergeFollowupJob(SqlFollowupJob):
         key_clauses = cls._gen_key_table_clauses(primary_keys, merge_keys)
         return [
             f"FROM {root_table_name} as d WHERE EXISTS (SELECT 1 FROM {staging_root_table_name} as"
-            f" s WHERE {' OR '.join([c.format(d='d',s='s') for c in key_clauses])})"
+            f" s WHERE {' OR '.join([c.format(d='d', s='s') for c in key_clauses])})"
         ]
 
     @classmethod
@@ -525,8 +548,7 @@ class SqlMergeFollowupJob(SqlFollowupJob):
                         merge_ex.dataset_name,
                         merge_ex.staging_dataset_name,
                         merge_ex.tables,
-                        merge_ex.reason
-                        + "No `parent_key` column (e.g. `_dlt_parent_id`) in table"
+                        merge_ex.reason + "No `parent_key` column (e.g. `_dlt_parent_id`) in table"
                         f" `{table['name']}`.",
                     ),
                 )

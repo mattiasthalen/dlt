@@ -249,11 +249,13 @@ TTableProcessingHints = TypedDict(
 
 TWriteDisposition = Literal["skip", "append", "replace", "merge"]
 TLoaderMergeStrategy = Literal["delete-insert", "scd2", "upsert", "insert-only"]
+TInsertOnlyScope = Literal["table", "previous_load"]
 TLoaderReplaceStrategy = Literal["truncate-and-insert", "insert-from-staging", "staging-optimized"]
 
 
 WRITE_DISPOSITIONS: Sequence[TWriteDisposition] = sorted(get_args(TWriteDisposition))
 MERGE_STRATEGIES: Sequence[TLoaderMergeStrategy] = sorted(get_args(TLoaderMergeStrategy))
+INSERT_ONLY_SCOPES: Sequence[TInsertOnlyScope] = sorted(get_args(TInsertOnlyScope))
 REPLACE_STRATEGIES: Sequence[TLoaderReplaceStrategy] = sorted(get_args(TLoaderReplaceStrategy))
 
 DEFAULT_VALIDITY_COLUMN_NAMES = ["_dlt_valid_from", "_dlt_valid_to"]
@@ -266,6 +268,7 @@ class TWriteDispositionDict(TypedDict):
 
 class TMergeDispositionDict(TWriteDispositionDict):
     strategy: Optional[TLoaderMergeStrategy]
+    scope: Optional[TInsertOnlyScope]
 
 
 class TDeleteInsertStrategyDict(TMergeDispositionDict):

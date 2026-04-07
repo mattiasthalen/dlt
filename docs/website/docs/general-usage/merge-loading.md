@@ -720,3 +720,61 @@ def my_insert_only_resource():
     ...
 ...
 ```
+
+### Duplicate detection scope
+
+By default, `insert-only` compares incoming rows against *all* existing rows in the destination table. This ensures that a row with a given primary key is only ever inserted once, regardless of when it was first loaded.
+
+For some use cases, you may want duplicate detection to compare only against the *previous load* instead of the entire table. This is useful for scenarios like:
+- **A>B>A patterns**: A key that disappears and later returns should be re-inserted
+- **Event replay**: Re-processing historical events where you want each load to be independent
+- **Partition-style loading**: Each load represents a distinct time window
+
+You can configure this with the optional `scope` parameter:
+- `"table"` (default): Compare against all existing rows in the table
+- `"previous_load"`: Compare only against rows from the immediately previous successful load
+
+```py
+@dlt.resource(
+    write_disposition={
+        "disposition": "merge",
+        "strategy": "insert-only",
+        "scope": "previous_load"  # only compare against previous load
+    },
+    primary_key="event_id"
+)
+def my_events():
+    ...
+```
+
+#### Example: A>B>A pattern with `previous_load` scope
+
+```py
+@dlt.resource(
+    write_disposition={
+        "disposition": "merge",
+        "strategy": "insert-only",
+        "scope": "previous_load"
+    },
+    primary_key="id"
+)
+def inventory():
+    ...
+
+# Load 1: items A, B
+pipeline.run(inventory())  # inserts A, B
+
+# Load 2: items B, C (A disappeared)
+pipeline.run(inventory())  # inserts C (B skipped as duplicate from previous load)
+
+# Load 3: items A, C (A returned)
+pipeline.run(inventory())  # inserts A (C skipped as duplicate from previous load)
+# A is re-inserted because it wasn't in the previous load (Load 2)
+```
+
+With `scope="table"` (the default), the third load would skip A because it already exists in the table from Load 1.
+
+:::warning
+The `scope="previous_load"` option is only supported for the `filesystem` destination with `delta` or `iceberg` table formats. SQL destinations and filesystem without table formats will raise an error if you use this option.
+:::
+```

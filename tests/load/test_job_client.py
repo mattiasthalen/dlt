@@ -9,7 +9,10 @@ from typing import Iterator, Tuple, List, Dict, Any
 
 from dlt.common import json, pendulum
 from dlt.common.configuration.container import Container
-from dlt.common.destination.exceptions import DestinationException
+from dlt.common.destination.exceptions import (
+    DestinationCapabilitiesException,
+    DestinationException,
+)
 from dlt.common.destination.utils import resolve_merge_strategy, resolve_replace_strategy
 from dlt.common.normalizers.naming import NamingConvention
 from dlt.common.schema import Schema
@@ -40,6 +43,7 @@ from tests.common.utils import load_json_case
 from tests.load.utils import (
     TABLE_UPDATE,
     expect_load_file,
+    cm_yield_client,
     load_table,
     set_always_refresh_views,
     cm_yield_client_with_storage,
@@ -824,7 +828,9 @@ def test_write_dispositions(
                     file_format=prepared_root_table.get("file_format"),  # type: ignore[arg-type]
                 )
                 query = f.getvalue()
-            expect_load_file(client, file_storage, query, t, file_format=prepared_root_table.get("file_format"))  # type: ignore[arg-type]
+            expect_load_file(
+                client, file_storage, query, t, file_format=prepared_root_table.get("file_format")
+            )  # type: ignore[arg-type]
             db_rows = list(
                 client.sql_client.execute_sql(
                     f"SELECT * FROM {client.sql_client.make_qualified_table_name(t)} ORDER BY"
@@ -860,6 +866,48 @@ def test_write_dispositions(
                         assert len(db_rows) == 1
             # last row must have our last idx - make sure we append and overwrite
             assert db_rows[-1][0] == pk_value
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(table_format_local_configs=True, subset=["filesystem"]),
+    ids=lambda x: x.name,
+)
+@pytest.mark.parametrize(
+    "as_staging_destination",
+    [False, True],
+    ids=["destination", "staging"],
+)
+def test_insert_only_previous_load_scope_rejected_for_table_format_filesystem(
+    destination_config: DestinationTestConfiguration,
+    as_staging_destination: bool,
+) -> None:
+    table_name = "event_test_table_" + uniq_id()
+
+    with cm_yield_client(
+        destination_config.destination_factory(as_staging_destination=as_staging_destination),
+        dataset_name="test_" + uniq_id(),
+    ) as client:
+        table = new_table(
+            table_name,
+            write_disposition="merge",
+            columns=[new_column("id", "bigint", nullable=False)],
+        )
+        table["table_format"] = destination_config.table_format
+        table["x-merge-strategy"] = "insert-only"  # type: ignore[typeddict-unknown-key]
+        table["x-insert-only-scope"] = "previous_load"  # type: ignore[typeddict-unknown-key]
+        table["columns"]["id"]["primary_key"] = True
+        client.schema.update_table(table)
+
+        if as_staging_destination:
+            with pytest.raises(
+                DestinationCapabilitiesException,
+                match=r"(?s)(previous_load.*insert-only|insert-only.*previous_load)",
+            ):
+                client.prepare_load_table(table_name)
+        else:
+            prepared_table = client.prepare_load_table(table_name)
+            assert prepared_table["x-insert-only-scope"] == "previous_load"  # type: ignore[typeddict-item]
 
 
 @pytest.mark.parametrize(
@@ -913,14 +961,16 @@ def test_get_resumed_job(
     ids=lambda x: x.name,
 )
 def test_default_schema_name_init_storage(destination_config: DestinationTestConfiguration) -> None:
-    with cm_yield_client_with_storage(
-        destination_config.destination_factory(),
-        default_config_values={
-            "default_schema_name": (  # pass the schema that is a default schema. that should create dataset with the name `dataset_name`
-                "event"
-            )
-        },
-    ) as client:
+    with (
+        cm_yield_client_with_storage(
+            destination_config.destination_factory(),
+            default_config_values={
+                "default_schema_name": (  # pass the schema that is a default schema. that should create dataset with the name `dataset_name`
+                    "event"
+                )
+            },
+        ) as client
+    ):
         assert client.sql_client.dataset_name == client.config.dataset_name
         assert client.sql_client.has_dataset()
 
@@ -935,14 +985,16 @@ def test_default_schema_name_init_storage(destination_config: DestinationTestCon
         assert client.sql_client.dataset_name == client.config.dataset_name
         assert client.sql_client.has_dataset()
 
-    with cm_yield_client_with_storage(
-        destination_config.destination_factory(),
-        default_config_values={
-            "default_schema_name": (  # the default schema is not event schema . that should create dataset with the name `dataset_name` with schema suffix
-                "event_2"
-            )
-        },
-    ) as client:
+    with (
+        cm_yield_client_with_storage(
+            destination_config.destination_factory(),
+            default_config_values={
+                "default_schema_name": (  # the default schema is not event schema . that should create dataset with the name `dataset_name` with schema suffix
+                    "event_2"
+                )
+            },
+        ) as client
+    ):
         assert client.sql_client.dataset_name == client.config.dataset_name + "_event"
         assert client.sql_client.has_dataset()
 

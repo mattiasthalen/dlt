@@ -5,10 +5,11 @@ from pathlib import Path
 
 from dlt import version, Pipeline
 from dlt.common import logger
+from dlt.common.destination.utils import resolve_insert_only_scope
 from dlt.common.libs.pyarrow import pyarrow as pa
 from dlt.common.libs.pyarrow import cast_arrow_schema_types
 from dlt.common.libs.utils import load_open_tables
-from dlt.common.schema.typing import TWriteDisposition, TTableSchema
+from dlt.common.schema.typing import C_DLT_LOAD_ID, TWriteDisposition, TTableSchema
 from dlt.common.schema.utils import get_first_column_name_with_prop, get_columns_names_with_prop
 from dlt.common.exceptions import MissingDependencyException, ValueErrorWithKnownValues
 from dlt.common.typing import DictStrAny
@@ -52,8 +53,8 @@ def ensure_delta_compatible_arrow_schema(
             # cast all dictionary fields to string — this is rogue because
             # 1. dictionary value type is disregarded
             # 2. any non-partition dictionary fields are cast too
-            ARROW_TO_DELTA_COMPATIBLE_ARROW_TYPE_MAP[pa.types.is_dictionary] = (
-                lambda t_: t_.value_type
+            ARROW_TO_DELTA_COMPATIBLE_ARROW_TYPE_MAP[pa.types.is_dictionary] = lambda t_: (
+                t_.value_type
             )
 
     # NOTE: also consider calling _convert_pa_schema_to_delta() from delta.schema which casts unsigned types
@@ -120,6 +121,7 @@ def merge_delta_table(
     schema: TTableSchema,
     load_table_name: str,
     streamed_exec: bool,
+    previous_load_id: Optional[str] = None,
 ) -> None:
     """Merges in-memory Arrow data into on-disk Delta table."""
 
@@ -127,14 +129,18 @@ def merge_delta_table(
     if strategy in ("upsert", "insert-only"):
         evolve_delta_table_schema(table, data.schema)
 
-        if "parent" in schema:
-            unique_column = get_first_column_name_with_prop(schema, "unique")
-            predicate = f"target.{unique_column} = source.{unique_column}"
-        else:
-            primary_keys = get_columns_names_with_prop(schema, "primary_key")
-            predicate = " AND ".join([f"target.{c} = source.{c}" for c in primary_keys])
-
         partition_by = get_columns_names_with_prop(schema, "partition")
+        predicate = " AND ".join(
+            [f"target.{c} = source.{c}" for c in _get_merge_identity_columns(schema)]
+        )
+
+        if strategy == "insert-only" and resolve_insert_only_scope(schema) == "previous_load":
+            if previous_load_id is None:
+                write_delta_table(table, data, "append", partition_by=partition_by)
+                return
+            escaped_previous_load_id = previous_load_id.replace("'", "''")
+            predicate = f"{predicate} AND target.{C_DLT_LOAD_ID} = '{escaped_previous_load_id}'"
+
         qry = table.merge(
             source=ensure_delta_compatible_arrow_data(data, partition_by),
             predicate=predicate,
@@ -151,6 +157,12 @@ def merge_delta_table(
             f'Merge strategy "{strategy}" is not supported for Delta tables. '
             f'Table: "{load_table_name}".'
         )
+
+
+def _get_merge_identity_columns(schema: TTableSchema) -> List[str]:
+    if "parent" in schema:
+        return [get_first_column_name_with_prop(schema, "unique")]
+    return get_columns_names_with_prop(schema, "primary_key")
 
 
 def get_delta_tables(

@@ -26,6 +26,7 @@ from dlt.common.schema.typing import (
     TTableFormat,
     TSchemaContract,
     DEFAULT_VALIDITY_COLUMN_NAMES,
+    INSERT_ONLY_SCOPES,
     MERGE_STRATEGIES,
     TTableReferenceParam,
 )
@@ -666,6 +667,8 @@ class DltResourceHints:
         md_dict: TMergeDispositionDict = dict_.pop("write_disposition")
         if merge_strategy := md_dict.get("strategy"):
             dict_["x-merge-strategy"] = merge_strategy
+            if merge_strategy == "insert-only" and (scope := md_dict.get("scope")):
+                dict_["x-insert-only-scope"] = scope
 
         if deduplicated := md_dict.get("deduplicated"):
             dict_["x-stage-data-deduplicated"] = deduplicated
@@ -764,7 +767,22 @@ class DltResourceHints:
     @staticmethod
     def validate_write_disposition_hint(template: TResourceHints) -> None:
         wd = template.get("write_disposition")
-        if isinstance(wd, dict) and wd["disposition"] == "merge":
+        if isinstance(wd, dict):
+            if "scope" in wd:
+                if wd.get("disposition") != "merge" or wd.get("strategy") != "insert-only":
+                    raise ValueError(
+                        "write_disposition['scope'] can only be used with "
+                        "write_disposition['disposition'] == 'merge' and "
+                        "write_disposition['strategy'] == 'insert-only'"
+                    )
+                if wd["scope"] not in INSERT_ONLY_SCOPES:
+                    raise ValueErrorWithKnownValues(
+                        "write_disposition['scope']", wd["scope"], INSERT_ONLY_SCOPES
+                    )
+
+            if wd["disposition"] != "merge":
+                return
+
             wd = cast(TMergeDispositionDict, wd)
             if "strategy" in wd and wd["strategy"] not in MERGE_STRATEGIES:
                 raise ValueErrorWithKnownValues(

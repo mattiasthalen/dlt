@@ -469,6 +469,21 @@ def test_list_dlt_table_files_with_separator_in_pipeline_name(pipeline_name: str
     assert results[0][1] == [pipeline_name, "load123", "hash123"]
 
 
+def test_get_last_completed_load_id_uses_load_metadata() -> None:
+    filesystem_ = filesystem("random_location")
+    client = _client_factory(filesystem_)
+    client.initialize_storage()
+
+    loads_table_dir = client.get_table_dir(client.schema.loads_table_name)
+    client.fs_client.mkdirs(loads_table_dir)
+    client.fs_client.touch(client.pathlib.join(loads_table_dir, "test__1710000000.1.jsonl"))
+    client.fs_client.touch(client.pathlib.join(loads_table_dir, "test__1710000000.2.jsonl"))
+    client.fs_client.touch(client.pathlib.join(loads_table_dir, "other__9999999999.9.jsonl"))
+    client.fs_client.touch(client.pathlib.join(loads_table_dir, "malformed.jsonl"))
+
+    assert client.get_last_completed_load_id() == "1710000000.2"
+
+
 def test_verify_schema_table_format(with_gdrive_buckets_env: str) -> None:
     filesystem_ = filesystem(with_gdrive_buckets_env)
     client = _client_factory(filesystem_)

@@ -86,6 +86,13 @@ def get_expected_actual(
     return (expected, actual)
 
 
+def _skip_if_local_iceberg_catalog_is_unavailable(table_format: TTableFormat) -> None:
+    if table_format != "iceberg":
+        return
+    if Version(pkg_version("sqlalchemy")) < Version("2.0.18"):
+        pytest.skip("local iceberg tests require sqlalchemy>=2.0.18")
+
+
 @pytest.mark.essential
 @pytest.mark.parametrize(
     "destination_config",
@@ -1430,6 +1437,191 @@ def test_open_table_insert_only_merge(
     alice = next(row for row in rows if row["id"] == 1)
     assert alice["name"] == "Alice"
     assert alice["value"] == 100
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(
+        table_format_local_configs=True,
+        subset=("filesystem",),
+    ),
+    ids=lambda x: x.name,
+)
+def test_open_table_insert_only_previous_load_skips_consecutive_duplicates(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    _skip_if_local_iceberg_catalog_is_unavailable(destination_config.table_format)
+
+    pipeline = destination_config.setup_pipeline("insert_only_previous_load", dev_mode=True)
+
+    write_disposition: TWriteDisposition = {
+        "disposition": "merge",
+        "strategy": "insert-only",
+        "scope": "previous_load",
+    }
+
+    info = pipeline.run(
+        [{"id": 1, "name": "Alice", "value": 100}],
+        table_name="items",
+        primary_key="id",
+        write_disposition=write_disposition,
+        table_format=destination_config.table_format,
+    )
+    assert_load_info(info)
+
+    info = pipeline.run(
+        [{"id": 1, "name": "Alice Updated", "value": 999}],
+        table_name="items",
+        primary_key="id",
+        write_disposition=write_disposition,
+        table_format=destination_config.table_format,
+    )
+    assert_load_info(info)
+
+    rows = load_tables_to_dicts(pipeline, "items", exclude_system_cols=True)["items"]
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
+    assert rows[0]["value"] == 100
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(
+        table_format_local_configs=True,
+        subset=("filesystem",),
+    ),
+    ids=lambda x: x.name,
+)
+def test_open_table_insert_only_previous_load_reinserts_after_gap(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    _skip_if_local_iceberg_catalog_is_unavailable(destination_config.table_format)
+
+    pipeline = destination_config.setup_pipeline(
+        "insert_only_previous_load_gap",
+        dev_mode=True,
+    )
+
+    write_disposition: TWriteDisposition = {
+        "disposition": "merge",
+        "strategy": "insert-only",
+        "scope": "previous_load",
+    }
+
+    info = pipeline.run(
+        [{"id": 1, "name": "Alice", "value": 100}],
+        table_name="items",
+        primary_key="id",
+        write_disposition=write_disposition,
+        table_format=destination_config.table_format,
+    )
+    assert_load_info(info)
+
+    info = pipeline.run(
+        [{"id": 2, "name": "Bob", "value": 200}],
+        table_name="items",
+        primary_key="id",
+        write_disposition=write_disposition,
+        table_format=destination_config.table_format,
+    )
+    assert_load_info(info)
+
+    info = pipeline.run(
+        [{"id": 1, "name": "Alice Again", "value": 300}],
+        table_name="items",
+        primary_key="id",
+        write_disposition=write_disposition,
+        table_format=destination_config.table_format,
+    )
+    assert_load_info(info)
+
+    rows = load_tables_to_dicts(pipeline, "items", exclude_system_cols=True)["items"]
+    assert len(rows) == 3
+    assert sorted(row["value"] for row in rows if row["id"] == 1) == [100, 300]
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(
+        table_format_local_configs=True,
+        subset=("filesystem",),
+    ),
+    ids=lambda x: x.name,
+)
+def test_open_table_insert_only_previous_load_ignores_uncommitted_row_load_ids(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    _skip_if_local_iceberg_catalog_is_unavailable(destination_config.table_format)
+    from dlt.common.libs.pyarrow import pyarrow as pa
+
+    pipeline = destination_config.setup_pipeline(
+        "insert_only_previous_load_uncommitted_boundary",
+        dev_mode=True,
+    )
+
+    write_disposition: TWriteDisposition = {
+        "disposition": "merge",
+        "strategy": "insert-only",
+        "scope": "previous_load",
+    }
+
+    info = pipeline.run(
+        [{"id": 1, "name": "Alice", "value": 100}],
+        table_name="items",
+        primary_key="id",
+        write_disposition=write_disposition,
+        table_format=destination_config.table_format,
+    )
+    assert_load_info(info)
+
+    if destination_config.table_format == "delta":
+        from dlt.common.libs.deltalake import get_delta_tables, write_delta_table
+
+        table = get_delta_tables(pipeline, "items")["items"]
+        write_delta_table(
+            table,
+            pa.table(
+                {
+                    "id": [999],
+                    "name": ["Partial"],
+                    "value": [0],
+                    "_dlt_load_id": ["9999999999.9"],
+                    "_dlt_id": ["partial-row"],
+                }
+            ),
+            "append",
+        )
+    else:
+        from dlt.common.libs.pyiceberg import get_iceberg_tables, write_iceberg_table
+
+        table = get_iceberg_tables(pipeline, "items")["items"]
+        write_iceberg_table(
+            table,
+            pa.table(
+                {
+                    "id": [999],
+                    "name": ["Partial"],
+                    "value": [0],
+                    "_dlt_load_id": ["9999999999.9"],
+                    "_dlt_id": ["partial-row"],
+                }
+            ),
+            "append",
+        )
+
+    info = pipeline.run(
+        [{"id": 1, "name": "Alice Updated", "value": 999}],
+        table_name="items",
+        primary_key="id",
+        write_disposition=write_disposition,
+        table_format=destination_config.table_format,
+    )
+    assert_load_info(info)
+
+    rows = load_tables_to_dicts(pipeline, "items", exclude_system_cols=True)["items"]
+    assert len(rows) == 2
+    assert sorted(row["id"] for row in rows) == [1, 999]
+    assert [row for row in rows if row["id"] == 1] == [{"id": 1, "name": "Alice", "value": 100}]
 
 
 @pytest.mark.parametrize(

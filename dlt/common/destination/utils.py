@@ -16,6 +16,7 @@ from dlt.common.schema.exceptions import (
     TableNotFound,
 )
 from dlt.common.schema.typing import (
+    TInsertOnlyScope,
     TColumnType,
     TLoaderMergeStrategy,
     TLoaderReplaceStrategy,
@@ -257,6 +258,14 @@ def resolve_replace_strategy(
         return None
 
     return required_strategy or supported_replace_strategies[0]
+
+
+def resolve_insert_only_scope(table: PreparedTableSchema) -> Optional[TInsertOnlyScope]:
+    if table.get("write_disposition") != "merge":
+        return None
+    if table.get("x-merge-strategy") != "insert-only":
+        return None
+    return table.get("x-insert-only-scope")  # type: ignore[return-value]
 
 
 @with_config

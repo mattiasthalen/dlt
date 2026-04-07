@@ -12,6 +12,7 @@ sqlalchemy = pytest.importorskip("sqlalchemy", minversion="2.0")
 
 from dlt.common.libs.pyiceberg import (
     get_catalog,
+    merge_iceberg_table,
 )
 
 # ============================================================================
@@ -154,6 +155,49 @@ def test_persistence_of_sqlite_catalog(tmp_path):
     # Verify namespace still exists after reload
     namespaces2 = catalog2.list_namespaces()
     assert test_namespace in [ns[0] if isinstance(ns, tuple) else ns for ns in namespaces2]
+
+
+def test_merge_iceberg_table_previous_load_uses_committed_load_id():
+    import pyarrow as pa
+
+    table = mock.MagicMock()
+    update_schema = mock.MagicMock()
+    update_schema.__enter__.return_value = update_schema
+    update_schema.__exit__.return_value = None
+    table.update_schema.return_value = update_schema
+
+    previous_rows = pa.table({"id": [1, 2], "_dlt_load_id": ["partial-load", "committed-load"]})
+
+    def scan(*, selected_fields):
+        if tuple(selected_fields) == ("_dlt_load_id",):
+            raise AssertionError("should not derive previous load from rows")
+        scan_result = mock.MagicMock()
+        scan_result.to_arrow.return_value = previous_rows
+        return scan_result
+
+    table.scan.side_effect = scan
+
+    schema = {
+        "name": "items",
+        "columns": {
+            "id": {"name": "id", "data_type": "bigint", "primary_key": True},
+        },
+        "write_disposition": "merge",
+        "x-merge-strategy": "insert-only",
+        "x-insert-only-scope": "previous_load",
+    }
+    data = pa.table({"id": [1], "_dlt_load_id": ["current-load"]})
+
+    merge_iceberg_table(
+        table=table,
+        data=data,
+        schema=schema,
+        load_table_name="items",
+        previous_load_id="committed-load",
+    )
+
+    appended = table.append.call_args.args[0]
+    assert appended.to_pylist() == [{"id": 1, "_dlt_load_id": "current-load"}]
 
 
 # ============================================================================

@@ -2,11 +2,13 @@ import os
 from typing import Iterator, Tuple, Union, cast
 from packaging.version import Version
 import pytest
+from unittest import mock
 
 import dlt
 from dlt.common.libs.pyarrow import pyarrow as pa
 from dlt.common.libs.deltalake import (
     DeltaTable,
+    merge_delta_table,
     write_delta_table,
     deltalake_storage_options,
 )
@@ -73,6 +75,41 @@ def test_deltalake_storage_options() -> None:
         "region",
     }
     assert opts["aws_access_key_id"] == "i_will_overwrite"
+
+
+def test_merge_delta_table_previous_load_uses_committed_load_id() -> None:
+    table = mock.MagicMock()
+    merge_query = mock.MagicMock()
+    merge_query.when_not_matched_insert_all.return_value = merge_query
+    table.merge.return_value = merge_query
+    table.to_pyarrow_table.side_effect = AssertionError("should not derive previous load from rows")
+
+    schema = {
+        "name": "items",
+        "columns": {
+            "id": {"name": "id", "data_type": "bigint", "primary_key": True},
+        },
+        "write_disposition": "merge",
+        "x-merge-strategy": "insert-only",
+        "x-insert-only-scope": "previous_load",
+    }
+    data = pa.table({"id": [1], "_dlt_load_id": ["current"]})
+
+    with mock.patch("dlt.common.libs.deltalake.evolve_delta_table_schema"):
+        merge_delta_table(
+            table=table,
+            data=data,
+            schema=schema,
+            load_table_name="items",
+            streamed_exec=False,
+            previous_load_id="committed-load-id",
+        )
+
+    assert (
+        table.merge.call_args.kwargs["predicate"]
+        == "target.id = source.id AND target._dlt_load_id = 'committed-load-id'"
+    )
+    merge_query.execute.assert_called_once()
 
 
 @pytest.mark.parametrize("arrow_data_type", (pa.Table, pa.RecordBatchReader))

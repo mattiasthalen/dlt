@@ -29,7 +29,11 @@ from tenacity import (
 )
 
 from dlt.common import logger, time, json, pendulum
-from dlt.common.destination.utils import resolve_merge_strategy, resolve_replace_strategy
+from dlt.common.destination.utils import (
+    resolve_insert_only_scope,
+    resolve_merge_strategy,
+    resolve_replace_strategy,
+)
 from dlt.common.metrics import LoadJobMetrics
 from dlt.common.schema.exceptions import TableNotFound
 from dlt.common.schema.typing import (
@@ -72,6 +76,7 @@ from dlt.common.destination.client import (
     LoadJob,
 )
 from dlt.common.destination.exceptions import (
+    DestinationCapabilitiesException,
     TableFormatNotSupported,
     WriteDispositionNotSupported,
     DestinationUndefinedEntity,
@@ -234,6 +239,7 @@ class DeltaLoadFilesystemJob(TableFormatLoadFilesystemJob):
                     schema=self._load_table,
                     load_table_name=self.load_table_name,
                     streamed_exec=self._job_client.config.deltalake_streamed_exec,
+                    previous_load_id=self._job_client.get_last_completed_load_id(),
                 )
             else:
                 location = self._job_client.get_open_table_location("delta", self.load_table_name)
@@ -318,6 +324,7 @@ class IcebergLoadFilesystemJob(TableFormatLoadFilesystemJob):
                 data=self.arrow_dataset.to_table(),
                 schema=self._load_table,
                 load_table_name=self.load_table_name,
+                previous_load_id=self._job_client.get_last_completed_load_id(),
             )
         else:
             write_iceberg_table(
@@ -704,8 +711,7 @@ class FilesystemClient(
             if (
                 # TODO: isdir is sufficient if table_dir == table prefix
                 #   since this method is used currently only for tests we do not need to improve it
-                self.fs_client.isdir(table_dir)
-                and len(self.list_table_files(table_name)) > 0
+                self.fs_client.isdir(table_dir) and len(self.list_table_files(table_name)) > 0
             ):
                 if table_name in self.schema.tables:
                     yield (table_name, self.schema.get_table_columns(table_name))
@@ -849,6 +855,14 @@ class FilesystemClient(
 
     def prepare_load_table(self, table_name: str) -> PreparedTableSchema:
         table = super().prepare_load_table(table_name)
+        if resolve_insert_only_scope(table) == "previous_load" and (
+            self.config.as_staging_destination
+            or table.get("table_format") not in ("delta", "iceberg")
+        ):
+            raise DestinationCapabilitiesException(
+                '`insert-only` merge strategy with `scope="previous_load"` is not yet'
+                " supported for `filesystem` destinations."
+            )
         if self.config.as_staging_destination:
             if table["write_disposition"] in ("merge", "replace"):
                 table["write_disposition"] = "append"
@@ -1024,6 +1038,22 @@ class FilesystemClient(
             # Filters only if pipeline_name provided
             if pipeline_name is None or fileparts[0] == pipeline_name:
                 yield filepath, fileparts
+
+    def get_last_completed_load_id(self) -> Optional[str]:
+        latest_load_id: Optional[str] = None
+        try:
+            files = self.list_table_files(self.schema.loads_table_name)
+        except DestinationUndefinedEntity:
+            # No _dlt_loads directory yet (first load)
+            return None
+        for filepath in files:
+            filename = os.path.splitext(os.path.basename(filepath))[0]
+            fileparts = filename.rsplit(FILENAME_SEPARATOR, maxsplit=1)
+            if len(fileparts) != 2 or fileparts[0] != self.schema.name:
+                continue
+            if latest_load_id is None or fileparts[1] > latest_load_id:
+                latest_load_id = fileparts[1]
+        return latest_load_id
 
     def _store_load(self, load_id: str) -> None:
         # write entry to load "table"

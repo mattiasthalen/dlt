@@ -1668,6 +1668,114 @@ def test_merge_strategy_config() -> None:
     assert isinstance(pip_ex.value.__cause__, DestinationCapabilitiesException)
 
 
+@pytest.mark.no_load
+def test_insert_only_scope_config() -> None:
+    with pytest.raises(ValueError):
+
+        @dlt.resource(
+            write_disposition={
+                "disposition": "merge",
+                "strategy": "insert-only",
+                "scope": "invalid",
+            }
+        )  # type: ignore[call-overload]
+        def invalid_scope_resource():
+            yield {"id": 1}
+
+    with pytest.raises(ValueError):
+
+        @dlt.resource(
+            write_disposition={
+                "disposition": "merge",
+                "strategy": "upsert",
+                "scope": "previous_load",
+            }
+        )  # type: ignore[call-overload]
+        def invalid_strategy_resource():
+            yield {"id": 1}
+
+    with pytest.raises(ValueError):
+
+        @dlt.resource(write_disposition={"disposition": "append", "scope": "previous_load"})  # type: ignore[call-overload]
+        def invalid_disposition_resource():
+            yield {"id": 1}
+
+    @dlt.resource(
+        primary_key="id",
+        write_disposition={
+            "disposition": "merge",
+            "strategy": "insert-only",
+            "scope": "previous_load",
+        },
+    )
+    def scoped_resource():
+        yield {"id": 1}
+
+    table = scoped_resource.compute_table_schema()
+
+    assert table["write_disposition"] == "merge"
+    assert table["x-merge-strategy"] == "insert-only"  # type: ignore[typeddict-item]
+    assert table["x-insert-only-scope"] == "previous_load"  # type: ignore[typeddict-item]
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(default_sql_configs=True, subset=["duckdb"]),
+    ids=lambda x: x.name,
+)
+def test_insert_only_previous_load_scope_rejected_for_sql_merge_destination(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    skip_if_unsupported_merge_strategy(destination_config, "insert-only")
+
+    p = destination_config.setup_pipeline("insert_only_previous_load_sql", dev_mode=True)
+
+    @dlt.resource(
+        primary_key="id",
+        write_disposition={
+            "disposition": "merge",
+            "strategy": "insert-only",
+            "scope": "previous_load",
+        },
+    )
+    def items():
+        yield [{"id": 1, "name": "Alice"}]
+
+    with pytest.raises(
+        PipelineStepFailed, match=r"(?s)(previous_load.*insert-only|insert-only.*previous_load)"
+    ):
+        p.run(items(), **destination_config.run_kwargs)
+
+
+@pytest.mark.parametrize(
+    "destination_config",
+    destinations_configs(local_filesystem_configs=True, subset=["filesystem"]),
+    ids=lambda x: x.name,
+)
+def test_insert_only_previous_load_scope_rejected_for_non_table_format_filesystem(
+    destination_config: DestinationTestConfiguration,
+) -> None:
+    skip_if_unsupported_merge_strategy(destination_config, "insert-only")
+
+    p = destination_config.setup_pipeline("insert_only_previous_load_filesystem", dev_mode=True)
+
+    @dlt.resource(
+        primary_key="id",
+        write_disposition={
+            "disposition": "merge",
+            "strategy": "insert-only",
+            "scope": "previous_load",
+        },
+    )
+    def items():
+        yield [{"id": 1, "name": "Alice"}]
+
+    with pytest.raises(
+        PipelineStepFailed, match=r"(?s)(previous_load.*insert-only|insert-only.*previous_load)"
+    ):
+        p.run(items(), **destination_config.run_kwargs)
+
+
 @pytest.mark.parametrize(
     "destination_config",
     destinations_configs(

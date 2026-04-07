@@ -55,6 +55,7 @@ from dlt.common.schema.typing import (
     TTypeDetections,
     TWriteDisposition,
     TLoaderMergeStrategy,
+    TInsertOnlyScope,
     TSchemaContract,
     TSortOrder,
     TTableReference,
@@ -911,6 +912,13 @@ def get_merge_strategy(tables: TSchemaTables, table_name: str) -> TLoaderMergeSt
     )
 
 
+def get_insert_only_scope(tables: TSchemaTables, table_name: str) -> TInsertOnlyScope:
+    return cast(
+        TInsertOnlyScope,
+        get_inherited_table_hint(tables, table_name, "x-insert-only-scope", allow_none=True),
+    )
+
+
 def fill_hints_from_parent_and_clone_table(
     tables: TSchemaTables, table: TTableSchema
 ) -> TTableSchema:
@@ -929,6 +937,9 @@ def fill_hints_from_parent_and_clone_table(
     if "x-merge-strategy" not in table:
         if strategy := get_merge_strategy(tables, table_name):
             table["x-merge-strategy"] = strategy  # type: ignore[typeddict-unknown-key]
+    if "x-insert-only-scope" not in table:
+        if insert_only_scope := get_insert_only_scope(tables, table_name):
+            table["x-insert-only-scope"] = insert_only_scope  # type: ignore[typeddict-unknown-key]
     return table
 
 
